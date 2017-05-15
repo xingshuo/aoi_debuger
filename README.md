@@ -1,6 +1,6 @@
 scene_debuger
 ==========
-a debug tool of game scene writed by pygame
+a debug tool of game scene writed by pygame  
 For test static map:
 -----
     sh run.sh
