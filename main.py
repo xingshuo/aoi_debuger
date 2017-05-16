@@ -10,6 +10,7 @@ reload(sys)
 sys.setdefaultencoding('utf-8')
 from sys import exit
 from thread import *
+from PyQt4 import QtGui,QtCore
 
 #===========const defines============
 COLOR_WHITE = (255,255,255)
@@ -30,6 +31,7 @@ MAX_BLK_COL = None
 MAX_AOI_ROW = None
 MAX_AOI_COL = None
 
+DOUBLE_CLICK_DELAY = 0.2
 PKG_HEAD_LEN = 3
 BIN_RECV_LEN = 512
 #============global values============
@@ -43,6 +45,10 @@ g_NetStreamBuffer = ""
 g_EntityObjectDict = {}
 g_EntityColors = {"player":COLOR_RED, "monster":COLOR_GREEN, "npc":COLOR_CHOCOLATE}
 g_ChineseFont = None
+g_MouseClickListener = None
+g_SingleClickPosList = []
+g_DoubleClickPosList = []
+g_Socketfd = None
 #============load map=================
 def load_map(path):
     print "----load map start----"
@@ -127,7 +133,7 @@ def get_scnpos_aoirect(pos):
     return (sx,sz),(ex,ez)
 
 def is_fullscreen_mode():
-    return g_DrawStartRealPos!=(0,0) or g_DrawEndRealPos!=(MAX_REAL_X,MAX_REAL_Z)
+    return g_DrawStartRealPos==(0,0) and g_DrawEndRealPos==(MAX_REAL_X,MAX_REAL_Z)
 
 def set_draw_realpos(stapos, endpos):
     global g_DrawStartRealPos,g_DrawEndRealPos,g_DrawRealXLen,g_DrawRealZLen
@@ -180,7 +186,7 @@ def game_draw_circle(surface, color, center_pos, radius):
     center_pos = pos_real2screen(center_pos)
     pygame.draw.circle(surface, color, center_pos, radius)
 
-#=========game entity obj class and methods========
+#=========game class and methods========
 class CObject:
     def __init__(self, id, x, z, stype, radius, name):
         self.m_ID = id
@@ -235,10 +241,61 @@ def DelObject(id):
     if g_EntityObjectDict.get(id, None):
         del g_EntityObjectDict[id]
 
+class CMouseClickListener:
+    def __init__(self):
+        self.m_ClickList = {1:[],2:[],3:[]}
+
+    def add_pygame_event(self, button, pos):
+        info = {"pos":pos,"timestamp":time.time()}
+        lst = self.m_ClickList[button]
+        if len(lst)>0 and info["timestamp"]-lst[-1]["timestamp"]<DOUBLE_CLICK_DELAY and info["pos"]==lst[-1]["pos"]:
+            lst.pop(-1)
+            self.on_event_doubleclick(button, pos)
+        else:
+            lst.append(info)
+
+    def update(self, curtime):
+        bak = self.m_ClickList
+        self.m_ClickList = {}
+        for button,lst in bak.items():
+            idx = 0
+            for i,info in enumerate(lst):
+                if curtime-info["timestamp"] >= DOUBLE_CLICK_DELAY:
+                    idx = i+1
+                    self.on_event_singleclick(button, info["pos"])
+                else:
+                    break
+            self.m_ClickList[button] = lst[idx:]
+
+    def on_event_singleclick(self, button, pos):
+        global g_SingleClickPosList,g_DoubleClickPosList
+        if button == 1: #left
+            if is_fullscreen_mode():
+                g_SingleClickPosList.append(pos)
+                if len(g_SingleClickPosList) > 2:
+                    g_SingleClickPosList.pop(0)
+        elif button == 2: #middle
+            g_SingleClickPosList = []
+            g_DoubleClickPosList = []
+            init_draw_realpos()
+        elif button == 3: #right
+            if len(g_SingleClickPosList) == 2:
+                sta_pos,end_pos = g_SingleClickPosList
+                g_SingleClickPosList = []
+                set_draw_realpos_bymouse(sta_pos,end_pos)
+
+    def on_event_doubleclick(self, button, pos):
+        global g_DoubleClickPosList
+        if button == 1:
+            if is_fullscreen_mode():
+                g_DoubleClickPosList.append(pos)
+                if len(g_DoubleClickPosList) > 1:
+                    g_DoubleClickPosList.pop(0)
+
 #============socket methods============
-def handle_socket(conn):
+def handle_socket():
     while True:
-        data = conn.recv(BIN_RECV_LEN)
+        data = g_Socketfd.recv(BIN_RECV_LEN)
         # print "recv data",data,"ok"
         if not data:
             print "socket disconnect!"
@@ -290,14 +347,81 @@ def handle_socket(conn):
     print "socket disconnect!!!!!"
 
 def run_socket_thread():
+    global g_Socketfd
     fd = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     fd.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
     fd.bind(("0.0.0.0", 9203))
     fd.listen(1)
     print "Wait Server Connect..."
-    conn,addr = fd.accept()
+    g_Socketfd,addr = fd.accept()
     print 'Connected Succeed with ' + addr[0] + ':' + str(addr[1])
-    start_new_thread(handle_socket, (conn,))
+    start_new_thread(handle_socket,())
+
+#============PyQt5================
+class Example(QtGui.QWidget):
+
+    def __init__(self):
+        super(Example, self).__init__()
+
+        self.initUI()
+
+    def initUI(self):
+        hbox = QtGui.QHBoxLayout() #水平的
+        vbox1 = QtGui.QVBoxLayout() #竖直的
+        vbox2 = QtGui.QVBoxLayout() #竖直的
+
+        LabelA = QtGui.QLabel(u'选择主角:', self)
+        ComboBoxA = QtGui.QComboBox(self)
+        ComboBoxA.addItem("Ubuntu")
+        ComboBoxA.addItem("Mandriva")
+        ComboBoxA.addItem("Fedora")
+        ComboBoxA.addItem("Red Hat")
+        ComboBoxA.addItem("Gentoo")
+        ComboBoxA.addItem("None")
+        self.connect(ComboBoxA, QtCore.SIGNAL('activated(QString)'), self.onActivated)
+        self.PushButtonA = QtGui.QPushButton(u'传送',self)
+        self.PushButtonA.clicked.connect(self.onPushButtonA)
+        PushButtonB = QtGui.QPushButton(u'主角信息',self)
+        vbox1.addWidget(LabelA)
+        vbox1.addWidget(ComboBoxA)
+        vbox1.addStretch(2)
+        vbox1.addWidget(self.PushButtonA)
+        vbox1.addStretch(1)
+        vbox1.addWidget(PushButtonB)
+        vbox1.addStretch(1)
+
+        LabelB = QtGui.QLabel(u'输出板', self)
+        TextEditA = QtGui.QTextEdit()
+        TextEditA.setReadOnly(True)
+        TextEditA.setPlainText("hhhhhh\nbbb%sddd"%(u'输出'))
+        vbox2.addWidget(LabelB)
+        vbox2.addWidget(TextEditA)
+        hbox.addLayout(vbox1,1)
+        hbox.addLayout(vbox2,2)
+
+        self.setLayout(hbox)
+        self.setGeometry(100, 100, 400, 500)
+        self.setWindowTitle('QT DebugWin')
+
+    def onActivated(self, text):
+        print "onactivated.. ",text
+
+    def onPushButtonA(self):
+        self.PushButtonA.setText('Hello World!')
+
+#---for test qt---
+print "start qt!!!!!"
+app = QtGui.QApplication(sys.argv)
+ex = Example()
+ex.show()
+sys.exit(app.exec_())
+
+def handle_Qt():
+    print "start qt!!!!!"
+    app = QtGui.QApplication(sys.argv)
+    ex = Example()
+    ex.show()
+    sys.exit(app.exec_())
 
 #============main method==========
 def run_test():
@@ -311,14 +435,17 @@ def run_test():
     init_draw_realpos()
     g_MapInit = True
     pygame.display.set_caption("Scene: "+blkfile)
+    start_new_thread(handle_Qt,())
 
 def main_loop():
     pygame.init()
     screen = pygame.display.set_mode((SCREEN_WIDTH,SCREEN_HEIGHT), 0, 32)
     clock = pygame.time.Clock()
-    mouse_click_lst = []
+    global g_SingleClickPosList,g_DoubleClickPosList
     global g_ChineseFont
     g_ChineseFont = pygame.font.Font("SIMSUN.TTC", 10)
+    global g_MouseClickListener
+    g_MouseClickListener = CMouseClickListener()
 
     if len(sys.argv) > 1:
         run_socket_thread()
@@ -332,26 +459,22 @@ def main_loop():
             if event.type == QUIT:
                 exit()
             elif event.type == MOUSEBUTTONDOWN:
-                if event.button == 1: #left
-                    if not is_fullscreen_mode():
-                        mouse_click_lst.append(event.pos)
-                        if len(mouse_click_lst) > 2:
-                            mouse_click_lst.pop(0)
-                elif event.button == 2: #middle
-                    mouse_click_lst = []
-                    init_draw_realpos()
-                elif event.button == 3: #right
-                    if len(mouse_click_lst) == 2:
-                        sta_pos,end_pos = mouse_click_lst
-                        mouse_click_lst = []
-                        set_draw_realpos_bymouse(sta_pos,end_pos)
+                g_MouseClickListener.add_pygame_event(event.button, event.pos)
+            elif event.type == KEYDOWN:
+                if event.key == ord('q'): #transfer
+                    if g_Socketfd:
+                        print "do send"
+                        g_Socketfd.send("do transfer!!!")
 
+        g_MouseClickListener.update(time.time())
         #draw background
+        t1 = time.time()
         screen.fill(COLOR_WHITE)
         #draw map block
         for tz,xlst in g_MapBlockDict.items():
             for tx in xlst:
                 game_draw_rect(screen, COLOR_CHOCOLATE, (tx[0],tz[0]), (tx[1],tz[1]))
+        t2 = time.time()
         #draw aoi line
         for i in xrange(MAX_AOI_ROW):
             z = MAX_REAL_X*i/MAX_AOI_ROW
@@ -360,21 +483,24 @@ def main_loop():
             x = MAX_REAL_Z*j/MAX_AOI_COL
             game_draw_line(screen, COLOR_BLACK, (x,0), (x,MAX_REAL_Z))
         #draw mouse click aoi rect
-        if mouse_click_lst:
-            sta_pos = mouse_click_lst[0]
-            lt_pos,rb_pos = get_scnpos_aoirect(sta_pos)
-            game_draw_rect(screen, COLOR_BLUE, lt_pos, rb_pos, 3)
-            if len(mouse_click_lst) > 1:
-                end_pos = mouse_click_lst[1]
-                lt_pos,rb_pos = get_scnpos_aoirect(end_pos)
+        for i,pos in enumerate(g_SingleClickPosList):
+            if i == 0:
+                lt_pos,rb_pos = get_scnpos_aoirect(pos)
+                game_draw_rect(screen, COLOR_BLUE, lt_pos, rb_pos, 3)
+            elif i == 1:
+                lt_pos,rb_pos = get_scnpos_aoirect(pos)
                 game_draw_rect(screen, COLOR_RED, lt_pos, rb_pos, 3)
+        if g_DoubleClickPosList:
+            lt_pos,rb_pos = get_scnpos_aoirect(g_DoubleClickPosList[0])
+            game_draw_rect(screen, COLOR_YELLOW, lt_pos, rb_pos, 3)
         #draw entity objects
         for id,obj in g_EntityObjectDict.items():
             obj.draw(screen)
-
-        pygame.transform.rotate(screen, 30)
+        t3 = time.time()
         pygame.display.update()
+        t4 = time.time()
+        # print "---draw cost time block:%f other:%f | update cost time:%f | total cost:%f | total entitys:%d--"%(t2-t1,t3-t2,t4-t3,t4-t1,len(g_EntityObjectDict))
         #每秒5帧
-        clock.tick(5)
+        clock.tick(30)
 
 main_loop()
