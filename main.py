@@ -24,9 +24,11 @@ COLOR_GREEN = (0,255,0)
 COLOR_BLUE = (0,255,255)
 COLOR_CHOCOLATE = (139,69,19)
 COLOR_GRAY = (138,138,138)
+COLOR_DARKBLUE = (0,0,255)
 
 SCREEN_WIDTH = 1000
 SCREEN_HEIGHT = 750
+SCREEN_SURFACE = None
 MAX_REAL_X = None
 MAX_REAL_Z = None
 MAX_BLK_ROW = None
@@ -51,8 +53,10 @@ g_EntityObjectDict = {}
 g_EntityColors = {"player":COLOR_RED, "monster":COLOR_GREEN, "npc":COLOR_CHOCOLATE}
 g_ChineseFont = None
 g_MouseClickListener = None
-g_SingleClickPosList = []
-g_DoubleClickPosList = []
+g_SingleClickPosList = [] #mouse left click
+g_DoubleClickPosList = [] #mouse left click
+g_ShowEntitysArea = False
+g_SaveSingleClickPos = False
 g_Socketfd = None
 g_DebugWin = None
 g_SceneID = None
@@ -146,6 +150,9 @@ def z_real2server(z):
 
 def get_scnpos_aoirect(pos):
     pos = pos_screen2real(pos)
+    return get_realpos_aoirect(pos)
+
+def get_realpos_aoirect(pos):
     sx = (pos[0]*MAX_AOI_COL/MAX_REAL_X)*(MAX_REAL_X/MAX_AOI_COL)
     ex = sx + MAX_REAL_X/MAX_AOI_COL
     sz = (pos[1]*MAX_AOI_ROW/MAX_REAL_Z)*(MAX_REAL_Z/MAX_AOI_ROW)
@@ -224,13 +231,48 @@ class CObject:
     def dir(self):
         return (self.m_DirX,self.m_DirZ)
 
-    def setpos(self, x, z):
-        msg = u'%s'%self.name() + " move from (%d,%d) to (%d,%d)"%(self.m_X,self.m_Z,x,z)
+    def getpos(self):
+        return (self.m_X,self.m_Z)
+
+    def on_change_pos(self,oldx,oldz):
+        msg = u'%s'%self.name() + " move from (%d,%d) to (%d,%d)"%(oldx,oldz,self.m_X,self.m_Z)
         g_QTSignalMgr.m_SglEditText.emit(QtCore.QString(msg), "a+")
-        self.m_DirX = (x-self.m_X)*5
-        self.m_DirZ = (z-self.m_Z)*5
+        if self.is_on_choose() and not is_fullscreen_mode(): #镜头跟随主角视野
+            sta_x,sta_z = g_DrawStartRealPos
+            end_x,end_z = g_DrawEndRealPos
+            if self.m_X < g_DrawStartRealPos[0]:
+                sta_x = sta_x - g_DrawRealXLen
+                if sta_x < 0:
+                    sta_x = 0
+                end_x = end_x - g_DrawRealXLen
+            elif self.m_X > g_DrawEndRealPos[0]:
+                sta_x = sta_x + g_DrawRealXLen    
+                end_x = end_x + g_DrawRealXLen
+                if end_x > MAX_REAL_X:
+                    end_x = MAX_REAL_X
+            if self.m_Z < g_DrawStartRealPos[1]:
+                sta_z = sta_z - g_DrawRealZLen
+                if sta_z < 0:
+                    sta_z = 0
+                end_z = end_z - g_DrawRealZLen
+            elif self.m_Z > g_DrawEndRealPos[1]:
+                sta_z = sta_z + g_DrawRealZLen
+                end_z = end_z + g_DrawRealZLen
+                if end_z > MAX_REAL_Z:
+                    end_z = MAX_REAL_Z
+            stapos = (sta_x,sta_z)
+            endpos = (end_x,end_z)
+            if stapos!=g_DrawStartRealPos or endpos!=g_DrawEndRealPos:
+                set_draw_realpos(stapos, endpos)
+
+    def setpos(self, x, z):
+        old_x = self.m_X
+        old_z = self.m_Z
         self.m_X = x
         self.m_Z = z
+        self.m_DirX = self.m_X - old_x
+        self.m_DirZ = self.m_Z - old_z
+        self.on_change_pos(old_x,old_z)
 
     def draw(self, surface):
         color = g_EntityColors.get(self.m_Type, COLOR_GREEN)
@@ -247,9 +289,8 @@ class CObject:
             dir_z = self.m_Z + self.m_DirZ*K/dir_len
         game_draw_line(surface, color, (self.m_X, self.m_Z), (dir_x, dir_z), MAX_REAL_X/g_DrawRealXLen)
         if self.is_on_choose():
-            scn_pos = pos_real2screen((self.m_X,self.m_Z))
-            lt_pos,rb_pos = get_scnpos_aoirect(scn_pos)
-            game_draw_rect(surface, COLOR_GRAY, lt_pos, rb_pos, 3)
+            lt_pos,rb_pos = get_realpos_aoirect(self.getpos())
+            game_draw_rect(surface, COLOR_RED, lt_pos, rb_pos, 3)
 
     def is_pos_inbody(self, pos):
         return math.pow(self.m_X-pos[0],2) + math.pow(self.m_Z-pos[1],2) <= self.radius()*self.radius()
@@ -289,6 +330,8 @@ class CMouseClickListener:
         self.m_ClickList = {1:[],2:[],3:[]}
 
     def add_pygame_event(self, button, pos):
+        if not self.m_ClickList.has_key(button):
+            return
         info = {"pos":pos,"timestamp":time.time()}
         lst = self.m_ClickList[button]
         if len(lst)>0 and info["timestamp"]-lst[-1]["timestamp"]<DOUBLE_CLICK_DELAY and info["pos"]==lst[-1]["pos"]:
@@ -313,28 +356,23 @@ class CMouseClickListener:
     def on_event_singleclick(self, button, pos):
         global g_SingleClickPosList,g_DoubleClickPosList
         if button == 1: #left
-            if is_fullscreen_mode():
+            if g_SaveSingleClickPos:
                 g_SingleClickPosList.append(pos)
-                if len(g_SingleClickPosList) > 2:
-                    g_SingleClickPosList.pop(0)
-                    g_SingleClickPosList.pop(0)
+            else:
+                g_SingleClickPosList = [pos]
         elif button == 2: #middle
-            g_SingleClickPosList = []
-            g_DoubleClickPosList = []
             init_draw_realpos()
         elif button == 3: #right
-            if len(g_SingleClickPosList) == 2:
-                sta_pos,end_pos = g_SingleClickPosList
-                g_SingleClickPosList = []
-                set_draw_realpos_bymouse(sta_pos,end_pos)
+            if is_fullscreen_mode():
+                if len(g_SingleClickPosList) == 2:
+                    sta_pos,end_pos = g_SingleClickPosList
+                    g_SingleClickPosList = []
+                    set_draw_realpos_bymouse(sta_pos,end_pos)
 
     def on_event_doubleclick(self, button, pos):
         global g_DoubleClickPosList
         if button == 1:
-            g_DoubleClickPosList.append(pos)
-            if len(g_DoubleClickPosList) > 1:
-                g_DoubleClickPosList.pop(0)
-
+            g_DoubleClickPosList = [pos]
             real_pos = pos_screen2real(pos)
             for id,oRole in g_EntityObjectDict.items():
                 if oRole.is_pos_inbody(real_pos):
@@ -413,7 +451,6 @@ class CQTSignalMgr(QtCore.QObject):
     m_SglEditText = QtCore.pyqtSignal(QtCore.QString, str, name="editext")
 
 class CDebugWin(QtGui.QWidget):
-
     def __init__(self):
         super(CDebugWin, self).__init__()
         self.initAttr()
@@ -433,11 +470,13 @@ class CDebugWin(QtGui.QWidget):
         self.m_ChooseRoleButton.clicked.connect(self.onClickChooseRole)
         self.m_TransRoleButton = QtGui.QPushButton(u'传送',self)
         self.m_TransRoleButton.clicked.connect(self.onTransRole)
-        self.m_PauseButton = QtGui.QPushButton(u'暂停',self)
-        self.m_PauseButton.clicked.connect(self.onPause)
         self.m_ChooseShowComBox = QtGui.QComboBox(self)
         self.m_ChooseShowComBox.addItem(u'场景信息')
         self.m_ChooseShowComBox.addItem(u'主角信息')
+        self.m_PauseButton = QtGui.QPushButton(u'暂停',self)
+        self.m_PauseButton.clicked.connect(self.onPause)
+        self.m_ResetButton = QtGui.QPushButton(u'复位',self)
+        self.m_ResetButton.clicked.connect(self.onReset)
         self.connect(self.m_ChooseShowComBox, QtCore.SIGNAL('activated(QString)'), self.onChooseShow)
         vbox1.addWidget(self.m_ChooseRoleButton)
         vbox1.addStretch(1)
@@ -446,6 +485,8 @@ class CDebugWin(QtGui.QWidget):
         vbox1.addWidget(self.m_ChooseShowComBox)
         vbox1.addStretch(1)
         vbox1.addWidget(self.m_PauseButton)
+        vbox1.addStretch(1)
+        vbox1.addWidget(self.m_ResetButton)
         vbox1.addStretch(1)
 
         LabelA = QtGui.QLabel(u'信息板', self)
@@ -486,6 +527,13 @@ class CDebugWin(QtGui.QWidget):
             self.m_PauseButton.setText(u'暂停')
         else:
             self.m_PauseButton.setText(u'播放')
+
+    def onReset(self):
+        self.onClearRole()
+        global g_SingleClickPosList,g_DoubleClickPosList,g_ShowEntitysArea
+        g_SingleClickPosList = []
+        g_DoubleClickPosList = []
+        g_ShowEntitysArea = False
 
     def onLogDebug(self):
         self.m_LogDebugButton.setText(u'打印中...')
@@ -595,6 +643,9 @@ def log_file(filename, txt, mod="a+"):
 
 #============main method==========
 def init_globals():
+    pygame.init()
+    global SCREEN_SURFACE
+    SCREEN_SURFACE = pygame.display.set_mode((SCREEN_WIDTH,SCREEN_HEIGHT), 0, 32)
     global g_ChineseFont
     g_ChineseFont = pygame.font.Font("SIMSUN.TTC", 10)
     global g_MouseClickListener
@@ -620,17 +671,45 @@ def process_exit():
     if not g_PlayCtrl:
         exit()
 
+def draw_world():
+    #draw background
+    SCREEN_SURFACE.fill(COLOR_WHITE)
+    #draw map block
+    for tz,xlst in g_MapBlockDict.items():
+        for tx in xlst:
+            game_draw_rect(SCREEN_SURFACE, COLOR_CHOCOLATE, (tx[0],tz[0]), (tx[1],tz[1]))
+    #draw aoi line
+    for i in xrange(MAX_AOI_ROW):
+        z = MAX_REAL_Z*i/MAX_AOI_ROW
+        game_draw_line(SCREEN_SURFACE, COLOR_BLACK, (0,z), (MAX_REAL_X,z))
+    for j in xrange(MAX_AOI_COL):
+        x = MAX_REAL_X*j/MAX_AOI_COL
+        game_draw_line(SCREEN_SURFACE, COLOR_BLACK, (x,0), (x,MAX_REAL_Z))
+    #draw mouse click aoi rect
+    if is_fullscreen_mode():
+        for i,pos in enumerate(g_SingleClickPosList):
+            lt_pos,rb_pos = get_scnpos_aoirect(pos)
+            game_draw_rect(SCREEN_SURFACE, COLOR_BLUE, lt_pos, rb_pos, 3)
+        for i,pos in enumerate(g_DoubleClickPosList):
+            lt_pos,rb_pos = get_scnpos_aoirect(pos)
+            game_draw_rect(SCREEN_SURFACE, COLOR_YELLOW, lt_pos, rb_pos, 3)
+        for id,obj in g_EntityObjectDict.items():
+            if g_ShowEntitysArea:
+                lt_pos,rb_pos = get_realpos_aoirect(obj.getpos())
+                game_draw_rect(SCREEN_SURFACE, COLOR_DARKBLUE, lt_pos, rb_pos, 3)
+    #draw entity objects
+    for id,obj in g_EntityObjectDict.items():
+        obj.draw(SCREEN_SURFACE)
+    pygame.display.update()
+
 def main_loop():
-    pygame.init()
-    screen = pygame.display.set_mode((SCREEN_WIDTH,SCREEN_HEIGHT), 0, 32)
-    clock = pygame.time.Clock()
     init_globals()
     run_Qt()
     if len(sys.argv) > 1:
         run_socket_thread()
     else:
         run_test()
-
+    clock = pygame.time.Clock()
     while True:
         if g_ProcessExit:
             break
@@ -640,46 +719,21 @@ def main_loop():
             elif event.type == MOUSEBUTTONDOWN:
                 g_MouseClickListener.add_pygame_event(event.button, event.pos)
             elif event.type == KEYDOWN:
-                if event.key:
-                    g_QTSignalMgr.m_SglEditText.emit(QtCore.QString(chr(event.key)), "a+")
+                if event.key == K_LSHIFT:
+                    global g_SaveSingleClickPos
+                    g_SaveSingleClickPos = True
+                elif event.key == K_q:
+                    global g_ShowEntitysArea
+                    g_ShowEntitysArea = not g_ShowEntitysArea
+            elif event.type == KEYUP:
+                if event.key == K_LSHIFT:
+                    global g_SaveSingleClickPos
+                    g_SaveSingleClickPos = False
 
         if not g_PlayCtrl:
             continue
         g_MouseClickListener.update(time.time())
-        #draw background
-        t1 = time.time()
-        screen.fill(COLOR_WHITE)
-        #draw map block
-        for tz,xlst in g_MapBlockDict.items():
-            for tx in xlst:
-                game_draw_rect(screen, COLOR_CHOCOLATE, (tx[0],tz[0]), (tx[1],tz[1]))
-        t2 = time.time()
-        #draw aoi line
-        for i in xrange(MAX_AOI_ROW):
-            z = MAX_REAL_X*i/MAX_AOI_ROW
-            game_draw_line(screen, COLOR_BLACK, (0,z), (MAX_REAL_X,z))
-        for j in xrange(MAX_AOI_COL):
-            x = MAX_REAL_Z*j/MAX_AOI_COL
-            game_draw_line(screen, COLOR_BLACK, (x,0), (x,MAX_REAL_Z))
-        #draw mouse click aoi rect
-        for i,pos in enumerate(g_SingleClickPosList):
-            if i == 0:
-                lt_pos,rb_pos = get_scnpos_aoirect(pos)
-                game_draw_rect(screen, COLOR_BLUE, lt_pos, rb_pos, 3)
-            elif i == 1:
-                lt_pos,rb_pos = get_scnpos_aoirect(pos)
-                game_draw_rect(screen, COLOR_RED, lt_pos, rb_pos, 3)
-        if g_DoubleClickPosList:
-            lt_pos,rb_pos = get_scnpos_aoirect(g_DoubleClickPosList[0])
-            game_draw_rect(screen, COLOR_YELLOW, lt_pos, rb_pos, 3)
-        #draw entity objects
-        for id,obj in g_EntityObjectDict.items():
-            obj.draw(screen)
-        t3 = time.time()
-        pygame.display.update()
-        t4 = time.time()
-        # print "---draw cost time block:%f other:%f | update cost time:%f | total cost:%f | total entitys:%d--"%(t2-t1,t3-t2,t4-t3,t4-t1,len(g_EntityObjectDict))
-        #每秒5帧
-        clock.tick(30)
+        draw_world()
+        clock.tick(30) #每秒x帧
 
 main_loop()
